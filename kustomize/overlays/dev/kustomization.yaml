@@ -19,4 +19,4 @@ patches:
 images:
 - name: skala-registry.skala-ai.com/class-7/sk216-webserver
   newName: skala-registry.skala-ai.com/class-7/sk216-webserver
-  newTag: ci-docker-1-b4532baa
+  newTag: ci-buildkit-sk216-ci-buildkit-script-1-b4532baa
