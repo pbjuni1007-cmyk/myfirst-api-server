@@ -10,7 +10,7 @@ public class HelloController {
     
     @GetMapping("/hello")
     public HelloResponse helloWorld() {
-        return new HelloResponse("SKALA에 오신 것을 환영합니다 — 자동 빌드 실습");
+        return new HelloResponse("SKALA에 오신 것을 환영합니다 — Webhook 자동 빌드 실습");
     }
 }
 
