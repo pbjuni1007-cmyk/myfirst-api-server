@@ -19,4 +19,4 @@ patches:
 images:
 - name: skala-registry.skala-ai.com/class-7/sk216-webserver
   newName: skala-registry.skala-ai.com/class-7/sk216-webserver
-  newTag: ci-buildah-sk216-ci-buildah-script-1-b4532baa
+  newTag: ci-buildah-sk216-ci-buildah-scm-1-b4532baa
