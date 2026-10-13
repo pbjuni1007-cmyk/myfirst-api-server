@@ -1,0 +1,73 @@
+pipeline {
+  agent any
+  environment {
+    IMAGE_BASE = 'skala-registry.skala-ai.com/class-7/sk216-webserver'
+  }
+  options { skipDefaultCheckout(true); timestamps(); disableConcurrentBuilds(); timeout(time: 30, unit: 'MINUTES') }
+  stages {
+    stage('Clone Repository') {
+      steps {
+        git branch: 'main', url: 'https://github.com/pbjuni1007-cmyk/myfirst-api-server.git', credentialsId: 'skala-github-id'
+        script {
+          env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+          env.IMAGE_REF = "${env.IMAGE_BASE}:ci-buildkit-${env.JOB_BASE_NAME}-${env.BUILD_NUMBER}-${env.SOURCE_COMMIT.take(8)}"
+        }
+        echo "Source commit: ${env.SOURCE_COMMIT}"
+      }
+    }
+    stage('Build with Maven') {
+      steps { sh 'mvn -B clean package -DskipTests' }
+    }
+    stage('Image Build and Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'skala-image-registry-id', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          sh '''
+            set +x
+            set -eu
+            BUILD_ROOT=$(mktemp -d)
+            export DOCKER_CONFIG="$BUILD_ROOT/auth"
+            mkdir -p "$DOCKER_CONFIG"
+            trap 'rm -rf "$BUILD_ROOT"' EXIT
+            printf '%s' "$REG_PASS" | docker login -u "$REG_USER" --password-stdin skala-registry.skala-ai.com
+            export BUILDKITD_FLAGS="--root=$BUILD_ROOT/state --oci-worker-snapshotter=native --containerd-worker=false"
+            buildctl-daemonless.sh build --frontend dockerfile.v0 --local context=. --local dockerfile=. --opt platform=linux/amd64 --opt "label:org.opencontainers.image.revision=$SOURCE_COMMIT" --output "type=image,name=$IMAGE_REF,push=true" --metadata-file image-metadata.json
+          '''
+        }
+      }
+    }
+    stage('GitOps Update') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'skala-github-id', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+          sh '''
+            set +x
+            set -eu
+            ASKPASS_DIR=$(mktemp -d)
+            trap 'rm -rf "$ASKPASS_DIR"' EXIT
+            printf '%s\n' '#!/bin/sh' 'case "$1" in *Username*) printf "%s\n" "$GIT_USER";; *) printf "%s\n" "$GIT_PASS";; esac' > "$ASKPASS_DIR/askpass"
+            chmod 700 "$ASKPASS_DIR/askpass"
+            export GIT_ASKPASS="$ASKPASS_DIR/askpass" GIT_TERMINAL_PROMPT=0
+            git config user.name "sk216-gitops"
+            git config user.email "sk216-gitops@users.noreply.github.com"
+            git ls-remote --heads origin refs/heads/gitops > "$ASKPASS_DIR/branch"
+            if test -s "$ASKPASS_DIR/branch"; then
+              git fetch origin refs/heads/gitops:refs/remotes/origin/gitops
+              git checkout -b gitops origin/gitops
+            else
+              git checkout -b gitops
+            fi
+            (cd kustomize/overlays/dev && kustomize edit set image "$IMAGE_BASE=$IMAGE_REF")
+            kustomize build kustomize/overlays/dev > rendered.yaml
+            git add kustomize/overlays/dev/kustomization.yaml
+            git commit -m "ci: image $IMAGE_REF (source $SOURCE_COMMIT)"
+            git push origin HEAD:refs/heads/gitops
+            printf '%s\n' "$SOURCE_COMMIT" "$IMAGE_REF" > build-reference.txt
+            git rev-parse HEAD > gitops-commit.txt
+          '''
+        }
+        archiveArtifacts artifacts: 'image-metadata.json,rendered.yaml,build-reference.txt,gitops-commit.txt', fingerprint: true
+      }
+    }
+  }
+
+  post { always { deleteDir() } }
+}
