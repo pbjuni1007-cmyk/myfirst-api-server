@@ -1,0 +1,66 @@
+pipeline {
+  agent any
+  environment {
+    KUBECONFIG = '/var/jenkins_home/.kube/sk216-config'
+    IMAGE_BASE = 'skala-registry.skala-ai.com/class-7/sk216-webserver'
+  }
+  options { skipDefaultCheckout(true); timestamps(); disableConcurrentBuilds(); timeout(time: 30, unit: 'MINUTES') }
+  stages {
+    stage('Clone Repository') {
+      steps {
+        checkout scm
+        script {
+          env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+          env.IMAGE_REF = "${env.IMAGE_BASE}:scm-buildah-${env.BUILD_NUMBER}-${env.SOURCE_COMMIT.take(8)}"
+        }
+        echo "Source commit: ${env.SOURCE_COMMIT}"
+      }
+    }
+    stage('Build with Maven') {
+      steps { sh 'mvn -B clean package -DskipTests' }
+    }
+    stage('Image Build and Push (Buildah)') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'skala-image-registry-id', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          sh '''
+            set +x
+            set -eu
+            BUILD_ROOT=$(mktemp -d)
+            export REGISTRY_AUTH_FILE="$BUILD_ROOT/auth.json"
+            trap 'rm -rf "$BUILD_ROOT"' EXIT
+            printf '%s' "$REG_PASS" | buildah login --authfile "$REGISTRY_AUTH_FILE" -u "$REG_USER" --password-stdin skala-registry.skala-ai.com
+            buildah --root "$BUILD_ROOT/storage" --runroot "$BUILD_ROOT/run" --storage-driver vfs bud --isolation chroot --platform linux/amd64 --label "org.opencontainers.image.revision=$SOURCE_COMMIT" -t "$IMAGE_REF" .
+            buildah --root "$BUILD_ROOT/storage" --runroot "$BUILD_ROOT/run" --storage-driver vfs push --authfile "$REGISTRY_AUTH_FILE" --digestfile image-digest.txt "$IMAGE_REF" "docker://$IMAGE_REF"
+          '''
+        }
+      }
+    }
+    stage('Render Deployment') {
+      steps {
+        sh '''
+          set -eu
+          cd kustomize/overlays/dev
+          kustomize edit set image "$IMAGE_BASE=$IMAGE_REF"
+          cd ../../..
+          kustomize build kustomize/overlays/dev > rendered.yaml
+          printf '%s\n' "$SOURCE_COMMIT" "$IMAGE_REF" > build-reference.txt
+        '''
+        archiveArtifacts artifacts: 'image-digest.txt,rendered.yaml,build-reference.txt', fingerprint: true
+      }
+    }
+    stage('Deploy to Kubernetes') {
+      steps {
+        sh '''
+          set -eu
+          test -f "$KUBECONFIG"
+          kubectl apply --dry-run=server -n class-7 -f rendered.yaml
+          kubectl apply -n class-7 -f rendered.yaml
+          kubectl rollout status deployment/sk216-cicd-api -n class-7 --timeout=180s
+          kubectl get deployment sk216-cicd-api -n class-7 -o json > deployed.json
+        '''
+        archiveArtifacts artifacts: 'deployed.json', fingerprint: true
+      }
+    }
+  }
+  post { always { deleteDir() } }
+}

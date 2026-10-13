@@ -1,0 +1,64 @@
+pipeline {
+  agent any
+  environment {
+    KUBECONFIG = '/var/jenkins_home/.kube/sk216-config'
+    IMAGE_BASE = 'skala-registry.skala-ai.com/class-7/sk216-webserver'
+  }
+  options { skipDefaultCheckout(true); timestamps(); disableConcurrentBuilds(); timeout(time: 30, unit: 'MINUTES') }
+  stages {
+    stage('Clone Repository') {
+      steps {
+        checkout scm
+        script {
+          env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+          env.IMAGE_REF = "${env.IMAGE_BASE}:scm-docker-${env.BUILD_NUMBER}-${env.SOURCE_COMMIT.take(8)}"
+        }
+        echo "Source commit: ${env.SOURCE_COMMIT}"
+      }
+    }
+    stage('Build with Maven') {
+      steps { sh 'mvn -B clean package -DskipTests' }
+    }
+    stage('Image Build and Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'skala-image-registry-id', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          sh '''
+            set +x
+            set -eu
+            export DOCKER_CONFIG=$(mktemp -d)
+            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+            printf '%s' "$REG_PASS" | docker login -u "$REG_USER" --password-stdin skala-registry.skala-ai.com
+            docker buildx build --platform linux/amd64 --label "org.opencontainers.image.revision=$SOURCE_COMMIT" -t "$IMAGE_REF" --metadata-file image-metadata.json --push .
+          '''
+        }
+      }
+    }
+    stage('Render Deployment') {
+      steps {
+        sh '''
+          set -eu
+          cd kustomize/overlays/dev
+          kustomize edit set image "$IMAGE_BASE=$IMAGE_REF"
+          cd ../../..
+          kustomize build kustomize/overlays/dev > rendered.yaml
+          printf '%s\n' "$SOURCE_COMMIT" "$IMAGE_REF" > build-reference.txt
+        '''
+        archiveArtifacts artifacts: 'image-metadata.json,rendered.yaml,build-reference.txt', fingerprint: true
+      }
+    }
+    stage('Deploy to Kubernetes') {
+      steps {
+        sh '''
+          set -eu
+          test -f "$KUBECONFIG"
+          kubectl apply --dry-run=server -n class-7 -f rendered.yaml
+          kubectl apply -n class-7 -f rendered.yaml
+          kubectl rollout status deployment/sk216-cicd-api -n class-7 --timeout=180s
+          kubectl get deployment sk216-cicd-api -n class-7 -o json > deployed.json
+        '''
+        archiveArtifacts artifacts: 'deployed.json', fingerprint: true
+      }
+    }
+  }
+  post { always { deleteDir() } }
+}
