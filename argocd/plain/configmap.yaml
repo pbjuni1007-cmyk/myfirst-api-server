@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sk216-argocd-yaml-demo
+  namespace: class-7
+  labels:
+    app.kubernetes.io/name: sk216-argocd-yaml-demo
+data:
+  lesson: "17"
+  rendering: "plain-directory"
+  message: "Argo CD 일반 YAML 동기화 확인"
