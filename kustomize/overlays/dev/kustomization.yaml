@@ -19,4 +19,4 @@ patches:
 images:
 - name: skala-registry.skala-ai.com/class-7/sk216-webserver
   newName: skala-registry.skala-ai.com/class-7/sk216-webserver
-  newTag: ci-buildkit-sk216-k8s-ci-buildkit-1-8e6e61dc
+  newTag: ci-buildkit-sk216-k8s-ci-buildkit-2-d76cfc80
